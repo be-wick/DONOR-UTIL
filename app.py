@@ -606,10 +606,35 @@ ORGAN_COLS = {
 DEFAULT_PARQUET = Path("features_parquet/donor_analysis_latest.parquet")
 
 @st.cache_data(show_spinner=True)
-def load_data(uploaded_file) -> pd.DataFrame:
-    df = pd.read_parquet(uploaded_file)
-    df["patient_id"] = df["patient_id"].astype(str)
+@st.cache_data(show_spinner=True)
+def load_data(source) -> pd.DataFrame:
+    df = pd.read_parquet(source)
+
+    # Standardize patient_id
+    if "patient_id" in df.columns:
+        df["patient_id"] = df["patient_id"].astype(str)
+
+    # Normalize hemodynamic column naming
+    HEMO_RENAME_MAP = {
+        "hemo_BPDiastolic": "BPDiastolic",
+        "hemo_BPSystolic": "BPSystolic",
+        "hemo_HeartRate": "HeartRate",
+        "hemo_Temperature": "Temperature",
+        "hemo_UrineOutput": "UrineOutput",
+    }
+
+    new_cols = {}
+    for col in df.columns:
+        for base, analyte in HEMO_RENAME_MAP.items():
+            if col.startswith(base + "_"):
+                suffix = col.replace(base + "_", "")
+                new_cols[col] = f"hemo_{analyte}_{suffix}"
+
+    if new_cols:
+        df = df.rename(columns=new_cols)
+
     return df
+
     # ============================================================
     # Normalize hemodynamic column naming (CRITICAL FIX)
     # ============================================================
@@ -672,20 +697,45 @@ st.caption("DONor Outcomes & Recovery - UTILization Analytics")
 # =============================
 # Sidebar — data source
 # =============================
-with st.sidebar:
-    st.header("Data source")
-    uploaded_file = st.file_uploader(
-    "Upload donor parquet (.parquet)",
-    type=["parquet"],
+# =============================
+# Sidebar — data source (URL-based, server-safe)
+
+
+        
+
+
+# -----------------------------
+# Load parquet from URL (cached)
+# -----------------------------
+@st.cache_data(show_spinner=True)
+def load_parquet_from_url(url: str) -> pd.DataFrame:
+    import requests
+    import io
+
+    r = requests.get(url, stream=True, timeout=120)
+    r.raise_for_status()
+
+    bio = io.BytesIO(r.content)
+    df = pd.read_parquet(bio)
+
+    if "patient_id" in df.columns:
+        df["patient_id"] = df["patient_id"].astype(str)
+
+    return df
+
+
+# -----------------------------
+# Execute load
+# -----------------------------
+# =============================
+parquet_url = (
+    "https://github.com/be-wick/DONOR-UTIL/releases/download/v1.0/donor_analysis_latest.parquet"
 )
-
-    if uploaded_file is None:
-        st.info("Please upload a donor parquet file to begin.")
-        st.stop()
-
-df = pd.read_parquet(uploaded_file)
-df["patient_id"] = df["patient_id"].astype(str)
-
+try:
+    df = load_parquet_from_url(parquet_url.strip())
+except Exception as e:
+    st.sidebar.error(f"Failed to load parquet from URL: {e}")
+    st.stop()
 
 # Derived metric maps
 abg_map = _pick_metric_cols(df, "abg_")
@@ -1125,11 +1175,12 @@ elif page == "Logistic Regression":
             y_clean = analysis_df.loc[valid, "__y__"].astype(int)
 
             res = fit_logistic_or(
-                df_in=analysis_df,
-                y=analysis_df["__y__"],
-                exposure=analysis_df["__x__"],
+                df_in=analysis_df.loc[valid],
+                y=y_clean,
+                exposure=analysis_df.loc[valid, "__x__"],
                 covariates=covariates,
-            )
+)
+
         except Exception as e:
             st.error(f"Regression failed: {e}")
             st.stop()
